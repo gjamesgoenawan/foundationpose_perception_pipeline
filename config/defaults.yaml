@@ -17,6 +17,10 @@
 # profile they were taken on, where their scope is unambiguous. What stays here is the part that
 # transfers: what each parameter trades, and how to re-sweep it.
 
+# ONNX files live here; generated TensorRT plans live in engine_cache/ underneath.
+# Relative to this YAML file. Profile overrides are relative to the profile file.
+models_dir: ../../models
+
 detection:
   # SAM3 confidence threshold applied to proposals before matching.
   # CONVENTIONAL, not measured: a deliberately permissive floor, because the rerank stage below is

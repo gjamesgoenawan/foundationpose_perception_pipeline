@@ -75,6 +75,25 @@ def foundationpose_root_missing_message() -> str:
     )
 
 
+def models_dir_default() -> Path:
+    """Resolve the model directory without requiring a dataset for standalone tools."""
+    config, dataset = preparse_config(), preparse_dataset()
+    if config or dataset or os.environ.get(CONFIG_ENV_VAR) or len(available_profiles()) == 1:
+        return settings_from_argv().models_dir
+    return _models_dir(_read_yaml(DEFAULTS_PATH), {}, DEFAULTS_PATH)
+
+
+def _models_dir(defaults: dict, overrides: dict, profile_path: Path) -> Path:
+    value = os.environ.get("MODELS_DIR")
+    if value:
+        return Path(value).expanduser().resolve()
+    value = overrides.get("models_dir", defaults["models_dir"])
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(f"{profile_path}: models_dir must be a non-empty path")
+    base = profile_path.parent if "models_dir" in overrides else DEFAULTS_PATH.parent
+    return _resolve_path(value, base)
+
+
 def help_requested(argv: list[str] | None = None) -> bool:
     """Whether this invocation is asking for ``--help`` rather than asking to run.
 
@@ -217,11 +236,10 @@ class DepthSettings:
     """
 
     engine: Path | None
-    """TensorRT engine the depth stage runs, through TAO Deploy, in this process.
+    """TensorRT engine the depth stage runs, through TensorRT, in this process.
 
-    None means no engine is configured, and every run then needs `--foundation-stereo-model`.
-    Build one with `tools/build_tao_engine.py`; an engine is machine-specific, which is why this
-    is a path in a profile rather than a name.
+    Accepts an ONNX source (compiled on demand) or a precompiled engine path.
+    None uses the conventional stereo model under MODELS_DIR, with plans in engine_cache/.
     """
 
 
@@ -246,6 +264,7 @@ class Settings:
     ground_truth: GroundTruthSettings
     depth: DepthSettings
     validation: ValidationSettings
+    models_dir: Path
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:
@@ -503,6 +522,7 @@ def load_settings(config: str | Path | None = None, dataset: str | None = None) 
     )
     return Settings(
         dataset=dataset_profile,
+        models_dir=_models_dir(defaults, overrides, profile_path),
         detection=detection,
         rerank=rerank,
         refinement=refinement,
@@ -543,6 +563,7 @@ def defaults_only_settings() -> Settings:
             output_root=CONFIG_DIR / "../output",
             batch_subdir="batch_run",
         ),
+        models_dir=_models_dir(defaults, {}, DEFAULTS_PATH),
         detection=detection,
         rerank=rerank,
         refinement=refinement,

@@ -34,6 +34,7 @@ import argparse
 import json
 import sys
 import time
+from contextlib import ExitStack
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -84,10 +85,12 @@ from foundationpose_perception_pipeline.pose import (  # noqa: E402
     inject_external_paths,
 )
 
-# External checkouts must be locatable before any model import; see `inject_external_paths`.
 inject_external_paths(REPO_ROOT, FOUNDATIONPOSE_ROOT_DEFAULT)
+
 from foundationpose_perception_pipeline.inference.config import InferenceConfig  # noqa: E402
-from foundationpose_perception_pipeline.inference.detect import base_text_state_from_prompt_state  # noqa: E402
+from foundationpose_perception_pipeline.inference.detect import (  # noqa: E402
+    base_text_state_from_prompt_state,
+)
 from foundationpose_perception_pipeline.inference.pose import run_foundationpose_for_proposals  # noqa: E402
 from foundationpose_perception_pipeline.inference.refine import apply_sam3_refinement  # noqa: E402
 from foundationpose_perception_pipeline.inference.select import (  # noqa: E402
@@ -184,8 +187,7 @@ def parse_args() -> argparse.Namespace:
     add_backend_arguments(parser)
     add_source_arguments(parser)
     parser.add_argument("--collected-root", type=Path, default=settings.dataset.collected_depth_root)
-    parser.add_argument("--checkpoint-path", type=Path, default=None)
-    parser.add_argument("--no-hf", action="store_true")
+    parser.add_argument("--sam3-models-dir", type=Path, default=None, help="Directory containing exported SAM3 engines and vocabulary.")
     parser.add_argument(
         "--no-overlays",
         action="store_true",
@@ -232,36 +234,24 @@ def run_inference(args: argparse.Namespace) -> Path:
         else None
     )
 
-    ensure_foundationpose_paths(args)
+    _, refine_model, score_model = ensure_foundationpose_paths(args)
     pose_renderer = PoseRenderer(args.dataset_root, args.models_subdir)
     pose_registry = FoundationPoseRegistry(
         engine_cache_dir=(args.fp_engine_cache_dir or (output_dir / "foundationpose_engine_cache")).resolve(),
-        refine_model_path=(
-            args.fp_refine_model_path.expanduser().resolve()
-            if args.fp_refine_model_path is not None
-            else (args.foundationpose_root / "weights" / "refiner_net.onnx").resolve()
-        ),
-        score_model_path=(
-            args.fp_score_model_path.expanduser().resolve()
-            if args.fp_score_model_path is not None
-            else (args.foundationpose_root / "weights" / "score_net.onnx").resolve()
-        ),
+        refine_model_path=refine_model,
+        score_model_path=score_model,
         models_subdir=args.models_subdir,
         device_id=args.fp_device_id,
         prepare_batch=args.fp_prepare_batch,
     )
 
-    import torch
-    from sam3.model.sam3_image_processor import Sam3Processor
-    from sam3.model_builder import build_sam3_image_model
+    from foundationpose_perception_pipeline.inference.sam3.trt_processor import Sam3TrtProcessor
 
-    model = build_sam3_image_model(
+    processor = Sam3TrtProcessor(
+        models_dir=args.sam3_models_dir,
+        resolution=args.resolution,
         device=args.device,
-        checkpoint_path=str(args.checkpoint_path) if args.checkpoint_path else None,
-        load_from_HF=not args.no_hf,
-    )
-    processor = Sam3Processor(
-        model, resolution=args.resolution, device=args.device, confidence_threshold=args.confidence_threshold
+        confidence_threshold=args.confidence_threshold,
     )
     # Built once from the CLI; each stage then receives only its own section.
     inference_config = InferenceConfig.from_args(args)
@@ -278,7 +268,7 @@ def run_inference(args: argparse.Namespace) -> Path:
         mark_selected_filter_results=mark_selected_filter_results,
         base_text_state_from_prompt_state=base_text_state_from_prompt_state,
         tensor_to_numpy=tensor_to_numpy,
-        torch=torch,
+        torch=None,
         no_refinement_policy=NO_REFINEMENT_POLICY,
     )
 
@@ -296,7 +286,9 @@ def run_inference(args: argparse.Namespace) -> Path:
 
     predictions_path = output_dir / "predictions.jsonl"
     runtime_rows: list[dict[str, Any]] = []
-    with predictions_path.open("w", encoding="utf-8") as predictions_file:
+    with predictions_path.open("w", encoding="utf-8") as predictions_file, ExitStack() as cleanup:
+        cleanup.callback(processor.release)
+        cleanup.callback(pose_registry.close)
         for scene_id in tqdm(scene_ids, desc=f"{args.dataset} inference"):
             scene_started = time.perf_counter()
             scene_dir = dataset_dir / args.split / f"{scene_id:06d}"
