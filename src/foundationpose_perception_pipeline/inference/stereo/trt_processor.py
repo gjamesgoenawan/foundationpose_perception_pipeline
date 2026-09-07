@@ -9,8 +9,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from foundationpose_perception_pipeline.inference.models import STEREO_MODEL, ModelPaths
 from foundationpose_perception_pipeline.inference.trt import TRTEngine
-from foundationpose_perception_pipeline.inference.models import ModelPaths, STEREO_MODEL
 
 DIVISIBILITY = 32
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
@@ -41,12 +41,23 @@ class FoundationStereoTrtProcessor:
         # ONNX mode waits for the rectified pair. Its real padded shape determines
         # the static profile, instead of guessing a rig-specific height here.
         if self.model_path.suffix.lower() == ".onnx":
-            import onnx
+            import tensorrt as trt
 
-            graph = onnx.load(str(self.model_path), load_external_data=False).graph
-            left_input = next(value for value in graph.input if value.name == "left_image")
-            shape = tuple(dim.dim_value for dim in left_input.type.tensor_type.shape.dim)
-            self.fixed_hw = tuple(shape[-2:]) if len(shape) == 4 and all(dim > 0 for dim in shape) else None
+            logger_trt = trt.Logger(trt.Logger.WARNING)
+            builder = trt.Builder(logger_trt)
+            network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
+            parser = trt.OnnxParser(network, logger_trt)
+            if parser.parse_from_file(str(self.model_path)):
+                for i in range(network.num_inputs):
+                    inp = network.get_input(i)
+                    if inp.name == "left_image":
+                        shape = tuple(inp.shape)
+                        self.fixed_hw = tuple(shape[-2:]) if len(shape) == 4 and all(dim > 0 for dim in shape) else None
+                        break
+                else:
+                    self.fixed_hw = None
+            else:
+                self.fixed_hw = None
             return
         self.engine = TRTEngine(self.engine_path)
         shape = tuple(self.engine.engine.get_tensor_shape("left_image"))

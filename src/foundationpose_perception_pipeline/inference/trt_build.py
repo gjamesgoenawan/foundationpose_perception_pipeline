@@ -15,7 +15,6 @@ Profiles = dict[str, tuple[Shape, Shape, Shape]]
 
 def _build_spec(source: Path, profiles: Profiles, precision: str, tf32: bool,
                 workspace_mb: int | None, device_id: int) -> dict:
-    import onnx
     import tensorrt as trt
     from cuda.bindings import runtime as cudart
 
@@ -28,16 +27,13 @@ def _build_spec(source: Path, profiles: Profiles, precision: str, tf32: bool,
     if status != cudart.cudaError_t.cudaSuccess:
         raise RuntimeError(f"Cannot inspect GPU {device_id}: {status}")
     gpu = bytes(properties.name).split(b"\0", 1)[0].decode()
-    artifacts = {source}
-    model = onnx.load(str(source), load_external_data=False)
-    for tensor in model.graph.initializer:
-        for entry in tensor.external_data:
-            if entry.key == "location":
-                artifacts.add(source.parent / entry.value)
     digest = hashlib.sha256()
-    for artifact in sorted(artifacts):
-        digest.update(str(artifact.relative_to(source.parent)).encode())
-        with artifact.open("rb") as handle:
+    with source.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    ext_data = source.with_name(source.name + "_data")
+    if ext_data.is_file():
+        with ext_data.open("rb") as handle:
             for chunk in iter(lambda: handle.read(1 << 20), b""):
                 digest.update(chunk)
     return {
@@ -111,8 +107,7 @@ def build_cached_engine(
             if any(dim < 0 for dim in tensor.shape):
                 if shapes is None:
                     raise ValueError(f"A concrete profile is required for {tensor.name} in {source}")
-                if not profile.set_shape(tensor.name, *shapes):
-                    raise ValueError(f"Invalid build profile for {tensor.name}: {shapes}")
+                profile.set_shape(tensor.name, *shapes)
                 has_dynamic = True
             elif shapes is not None and any(tuple(shape) != tuple(tensor.shape) for shape in shapes):
                 raise ValueError(f"Profile for {tensor.name} disagrees with fixed ONNX shape {tensor.shape}")

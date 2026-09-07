@@ -12,13 +12,22 @@ from pathlib import Path
 from typing import Any
 
 import cv2
-import ftfy
 import numpy as np
 import regex as re
 from PIL import Image
 
-from foundationpose_perception_pipeline.inference.models import ModelPaths, SAM3_MODELS
+from foundationpose_perception_pipeline.inference.models import SAM3_MODELS, ModelPaths
 from foundationpose_perception_pipeline.inference.trt import TRTEngine
+
+try:
+    import ftfy
+
+    def _fix_text(text: str) -> str:
+        return ftfy.fix_text(text)
+except ImportError:
+
+    def _fix_text(text: str) -> str:
+        return text
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +114,7 @@ class PureSimpleTokenizer:
             texts = [texts]
         all_tokens = []
         for text in texts:
-            cleaned = re.sub(r"\s+", " ", html.unescape(html.unescape(ftfy.fix_text(text))).strip()).lower()
+            cleaned = re.sub(r"\s+", " ", html.unescape(html.unescape(_fix_text(text))).strip()).lower()
             tokens = [self.sot_token_id]
             for token in re.findall(self.pat, cleaned):
                 token_bpe = "".join(self.byte_encoder[b] for b in token.encode("utf-8"))
